@@ -5,6 +5,7 @@ import csv
 import editdistance
 import pytesseract
 import sys
+import zipfile
 
 VERBOSE = True
 MAX_EDIT_DISTANCE = 6
@@ -20,7 +21,10 @@ def replace_hard_dashes(s):
     return s.replace('\xe2', '-')
 
 def replace_digits(s):
-    return s.replace('l', '1').replace('O', '0')
+    s = s.replace('l', '1')
+    s = s.replace('O', '0')
+    s = s.replace('Z', '2')
+    return s
 
 def parse_int(s):
     return int(replace_digits(s))
@@ -28,31 +32,46 @@ def parse_int(s):
 def line_approx_equal(expected, parsed):
     return (editdistance.eval(expected, replace_hard_dashes(parsed)) < MAX_EDIT_DISTANCE)
 
-def do_everything(tiff_path, csv_path):
+# returns a list of CSV rows
+def scan_image(filename, file_object):
+    rows = []
 
-    rows = [ ['Page', 'Year', 'Term', 'Number',
-              'A+', 'A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D+', 'D',
-              'D-', 'F', 'CR', 'NC', 'AU', 'W', 'WU', 'NC', 'I', 'RP', 'RD'], ]
+    message("reading '" + filename + "'...\n")
 
-    message("scanning '" + tiff_path + "'...\n")
-
-    im = PIL.Image.open(tiff_path)
+    im = PIL.Image.open(file_object)
     page = 1
     more_pages = True
     while more_pages:
         try:
             im.seek(page - 1)
 
-            message('page ' + str(page) + ': ')
+            message('    page ' + str(page) + ': ')
 
             text = pytesseract.image_to_string(im)
             lines = text.split('\n')
 
             year = term = UNDEFINED
             for line in lines:
-                if ('Fall' in line) or ('Spring' in line) or ('Summer' in line):
-                    term, year = line.split()
-                    year = parse_int(year)
+                got_fall = 'Fall' in line
+                got_spring = 'Spring' in line
+                got_summer = 'Summer' in line
+                if got_fall or got_spring or got_summer:
+                    if got_fall:
+                        term = 'Fall'
+                    elif got_spring:
+                        term = 'Spring'
+                    else:
+                        term = 'Summer'
+
+                    tokens = line.split()
+                    for token in tokens:
+                        try:
+                            year = parse_int(token)
+                            break
+                        except Exception:
+                            pass
+
+                    assert(year != UNDEFINED)
                     break
 
             number = UNDEFINED
@@ -87,9 +106,27 @@ def do_everything(tiff_path, csv_path):
 
     im.close()
 
+    return rows
+
+def scan_zip(zip_path, csv_path):
+    rows = [ ['Page', 'Year', 'Term', 'Number',
+              'A+', 'A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D+', 'D',
+              'D-', 'F', 'CR', 'NC', 'AU', 'W', 'WU', 'NC', 'I', 'RP', 'RD'], ]
+
+    message('in "' + zip_path + '"...\n')
+
+    z = zipfile.ZipFile(zip_path, 'r')
+
+    for name in z.namelist():
+        f = z.open(name)
+        rows += scan_image(name, f)
+        f.close()
+
+    z.close()
+
     message("writing '" + csv_path + "'...\n")
     with open(csv_path, 'w') as f:
         w = csv.writer(f)
         w.writerows(rows)
-        
-do_everything('DOC.png', 'grade-report.csv')
+
+scan_zip(sys.argv[1], 'grade-report.csv')
