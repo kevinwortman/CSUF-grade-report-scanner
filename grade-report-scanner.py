@@ -1,132 +1,116 @@
 #!/bin/env python2
 
-import PIL
 import csv
 import editdistance
-import pytesseract
+import subprocess
 import sys
-import zipfile
 
 VERBOSE = True
-MAX_EDIT_DISTANCE = 6
 UNDEFINED = '?'
-HIGH_GRADE_HEADER = 'A+: A: A-: B+: B: B-: C+: C: C-: D+: D:'
-LOW_GRADE_HEADER = 'D-: F: CR: NC: AU: W: WU: NC*: I: RP: RD:'
+SPRING = 'Spring'
+FALL = 'Fall'
+SUMMER = 'Summer'
+PAGE_SEPARATOR = '=' * 79
+GRADE_TITLE = 'GRADE BREAKDOWN/PERCENTAGE'
+HEADER_ROW = ['Page', 'Year', 'Term', 'Number',
+              'A+', 'A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D+', 'D',
+              'D-', 'F', 'CR', 'NC', 'AU', 'W', 'WU', 'NC', 'I', 'RP', 'RD']
 
 def message(s):
     if VERBOSE:
         sys.stdout.write(s)
-
-def replace_hard_dashes(s):
-    return s.replace('\xe2', '-')
+        sys.stdout.flush()
 
 def replace_digits(s):
     s = s.replace('l', '1')
     s = s.replace('O', '0')
+    s = s.replace('z', '2')
     s = s.replace('Z', '2')
+    s = s.replace('S', '5')
     return s
 
 def parse_int(s):
     return int(replace_digits(s))
 
-def line_approx_equal(expected, parsed):
-    return (editdistance.eval(expected, replace_hard_dashes(parsed)) < MAX_EDIT_DISTANCE)
+def parse_tally_line(s):
+    s = s.replace('.', '')
+    return [parse_int(token) for token in s.split()]
 
-# returns a list of CSV rows
-def scan_image(filename, file_object):
+def ocr(tiff_path, text_path_basename):
+    message('OCRing "' + tiff_path + '" with tesseract...\n')
+    subprocess.call(['tesseract',
+                     tiff_path,
+                     text_path_basename,
+                     '-c', 'tessedit_char_whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567890:/.+-%"',
+                     '-c', 'include_page_breaks=1',
+                     '-c', 'page_separator=' + PAGE_SEPARATOR])
+
+def parse_grades(text_path):
     rows = []
-
-    message("reading '" + filename + "'...\n")
-
-    im = PIL.Image.open(file_object)
-    page = 1
-    more_pages = True
-    while more_pages:
-        try:
-            im.seek(page - 1)
-
-            message('    page ' + str(page) + ': ')
-
-            text = pytesseract.image_to_string(im)
-            lines = text.split('\n')
+    
+    with open(text_path) as f:
+        text = f.read()
+        
+        pages = [page
+                 for page in text.split(PAGE_SEPARATOR)
+                 if len(page.strip()) > 0]
+        
+        for page_index in range(len(pages)):
+            page = pages[page_index]
+            
+            lines = page.splitlines()
+            lines = [line.strip() for line in lines]
+            lines = [line
+                     for line in lines
+                     if len(line) > 0]
 
             year = term = UNDEFINED
             for line in lines:
-                got_fall = 'Fall' in line
-                got_spring = 'Spring' in line
-                got_summer = 'Summer' in line
-                if got_fall or got_spring or got_summer:
-                    if got_fall:
-                        term = 'Fall'
-                    elif got_spring:
-                        term = 'Spring'
-                    else:
-                        term = 'Summer'
+                tokens = line.split()
+                if len(tokens) < 2:
+                    continue
+                
+                match = False
+                t0, t1 = tokens[0], tokens[1]
+                if editdistance.eval(t0, SPRING) <= 1:
+                    term = SPRING
+                    match = True
+                elif editdistance.eval(t0, FALL) <= 1:
+                    term = FALL
+                    match = True
+                elif editdistance.eval(t0, SUMMER) <= 1:
+                    term = SUMMER
+                    match = True
 
-                    tokens = line.split()
-                    for token in tokens:
-                        try:
-                            year = parse_int(token)
-                            break
-                        except Exception:
-                            pass
-
-                    assert(year != UNDEFINED)
+                if match:
+                    year = parse_int(t1)
                     break
 
-            number = UNDEFINED
-            for line in lines:
-                if 'CPSC' in line:
-                    token = line.split('CPSC')[-1]
-                    fixed = replace_digits(replace_hard_dashes(token))
-                    tokens = fixed.split('-')
-                    number = tokens[1]
-                    break
-
-            pass_counts = [UNDEFINED] * 11
+            tallies = [UNDEFINED] * 22
             for i in range(len(lines)):
-                if line_approx_equal(HIGH_GRADE_HEADER, lines[i]):
-                    pass_counts = [parse_int(token) for token in lines[i+1].split()]
-                    break
+                if editdistance.eval(lines[i], GRADE_TITLE) <= 2:
+                    high_grade_line = lines[i+2]
+                    low_grade_line = lines[i+5]
+                    tallies = parse_tally_line(high_grade_line) + parse_tally_line(low_grade_line)
 
-            fail_counts = [UNDEFINED] * 11
-            for i in range(len(lines)):
-                if line_approx_equal(LOW_GRADE_HEADER, lines[i]):
-                    fail_counts = [parse_int(token) for token in lines[i+1].split()]
-                    break
-
-            rows.append([page, year, term, number] + pass_counts + fail_counts)
-
-            message(str(year) + ' ' + term + ' ' + number + '\n')
-
-            page += 1
-
-        except EOFError:
-            more_pages = False
-
-    im.close()
-
+            rows.append([page_index + 1, year, term] + tallies)
+            
     return rows
 
-def scan_zip(zip_path, csv_path):
-    rows = [ ['Page', 'Year', 'Term', 'Number',
-              'A+', 'A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D+', 'D',
-              'D-', 'F', 'CR', 'NC', 'AU', 'W', 'WU', 'NC', 'I', 'RP', 'RD'], ]
-
-    message('in "' + zip_path + '"...\n')
-
-    z = zipfile.ZipFile(zip_path, 'r')
-
-    for name in z.namelist():
-        f = z.open(name)
-        rows += scan_image(name, f)
-        f.close()
-
-    z.close()
-
-    message("writing '" + csv_path + "'...\n")
+def tiff_to_csv(tiff_path, csv_path):
+    ocr(tiff_path, 'ocr')
+    rows = parse_grades('ocr.txt')
     with open(csv_path, 'w') as f:
         w = csv.writer(f)
+        w.writerow(HEADER_ROW)
         w.writerows(rows)
 
-scan_zip(sys.argv[1], 'grade-report.csv')
+def main():
+    if len(sys.argv) != 3:
+        print('usage:\n')
+        print('  python grade-report-scanner.py TIFF_PATH CSV_PATH\n')
+        sys.exit(1)
+
+    tiff_to_csv(sys.argv[1], sys.argv[2])
+
+main()
